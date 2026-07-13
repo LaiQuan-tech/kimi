@@ -1,0 +1,63 @@
+name: Deploy Web to Vercel
+
+# The Vercel `hr` project's native GitHub integration is not connected (the repo
+# has no Vercel webhook), so pushes did not auto-deploy the web app. This
+# workflow triggers a Vercel production deployment of the pushed commit via the
+# REST API — the same call we verified by hand — using the VERCEL_TOKEN secret.
+# Mirrors deploy-api.yml (Railway) for the API side.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+# Only the latest push to main needs to deploy; cancel superseded runs.
+concurrency:
+  group: deploy-web
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      PROJECT_ID: prj_7A6KghyNElcy89JlKzyxIV3c7JZg
+      REPO_ID: "1278206695"
+    steps:
+      - name: Trigger Vercel production deployment
+        id: trigger
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS -X POST "https://api.vercel.com/v13/deployments?forceNew=1" \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"hr\",\"project\":\"${PROJECT_ID}\",\"target\":\"production\",\"gitSource\":{\"type\":\"github\",\"repoId\":${REPO_ID},\"ref\":\"main\",\"sha\":\"${GITHUB_SHA}\"}}")
+          id=$(echo "$resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))")
+          if [ -z "$id" ]; then
+            echo "Deployment trigger failed:"; echo "$resp" | head -c 800; echo
+            exit 1
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "Triggered Vercel deployment $id for $GITHUB_SHA"
+
+      - name: Wait for deployment to finish
+        run: |
+          set -euo pipefail
+          id="${{ steps.trigger.outputs.id }}"
+          for i in $(seq 1 60); do
+            state=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "https://api.vercel.com/v13/deployments/$id" \
+              | python3 -c "import sys,json;print(json.load(sys.stdin).get('readyState',''))")
+            echo "[$i] $state"
+            case "$state" in
+              READY) echo "Deployment READY"; exit 0 ;;
+              ERROR|CANCELED) echo "::error::Deployment $state"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for deployment"; exit 1

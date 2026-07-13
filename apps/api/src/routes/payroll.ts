@@ -1,0 +1,416 @@
+import { Router, type Request, type Response, type NextFunction } from "express"
+import { z } from "zod"
+import {
+  computePayslip,
+  parseRuleConfig,
+  type RuleConfig,
+  type AttendanceDay,
+  type DayType,
+  type SalaryStructure,
+} from "@hr/rules"
+import { requireAuth } from "../middleware/auth.js"
+import { requireTenant } from "../middleware/tenant.js"
+import { requireHrAdmin } from "../middleware/role.js"
+import { supabaseAdmin } from "../lib/supabase.js"
+import { DEFAULT_RULE_CONFIG } from "../lib/default-rule-config.js"
+
+export const payrollRouter = Router()
+
+// "YYYY-MM" — a payroll period (calendar month).
+const periodRe = /^\d{4}-\d{2}$/
+
+const runSchema = z.object({
+  employeeId: z.string().uuid().optional(),
+  period: z.string().regex(periodRe, "period must be YYYY-MM"),
+})
+
+const listQuerySchema = z.object({
+  employeeId: z.string().uuid().optional(),
+  period: z.string().regex(periodRe).optional(),
+})
+
+const SELECT_COLS =
+  "id, tenant_id, employee_id, period, base, overtime_pay, night_pay, attendance_bonus, gross, breakdown, status, version, created_at, updated_at"
+
+/** Inclusive [first, lastExclusive) day bounds for a 'YYYY-MM' period, used to
+ * filter attendance_days by work_date. lastExclusive is the 1st of next month so
+ * the upper bound is a clean `< first-of-next-month` (no end-of-month math). */
+function monthBounds(period: string): { first: string; nextFirst: string } {
+  const [y, m] = period.split("-").map((s) => Number(s))
+  const first = `${period}-01`
+  const ny = m === 12 ? y + 1 : y
+  const nm = m === 12 ? 1 : m + 1
+  const nextFirst = `${String(ny).padStart(4, "0")}-${String(nm).padStart(2, "0")}-01`
+  return { first, nextFirst }
+}
+
+interface AttendanceDayRow {
+  employee_id: string
+  work_date: string
+  worked_minutes: number
+  late_minutes: number
+  overtime_minutes: number
+  night_minutes: number
+  day_type: string
+}
+
+interface SalaryRow {
+  employee_id: string
+  method: string
+  base_salary: string | null
+  daily_wage: string | null
+  hourly_wage: string | null
+}
+
+/** Map a stored salary_structures row → the engine's SalaryStructure (numerics
+ * are returned by PostgREST as strings, so coerce). */
+function toSalaryStructure(row: SalaryRow): SalaryStructure {
+  return {
+    method: row.method === "by_attendance_days" ? "by_attendance_days" : "monthly",
+    baseSalary: row.base_salary != null ? Number(row.base_salary) : undefined,
+    dailyWage: row.daily_wage != null ? Number(row.daily_wage) : undefined,
+    hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
+  }
+}
+
+/** Map a stored attendance_days row → the engine's AttendanceDay. */
+function toAttendanceDay(row: AttendanceDayRow): AttendanceDay {
+  const dt = row.day_type
+  const dayType: DayType =
+    dt === "rest_day" || dt === "fixed_holiday" ? dt : "workday"
+  return {
+    date: row.work_date,
+    workedMinutes: row.worked_minutes,
+    lateMinutes: row.late_minutes,
+    overtimeMinutes: row.overtime_minutes,
+    nightMinutes: row.night_minutes,
+    dayType,
+  }
+}
+
+// Resolve the caller's own employee row (id + role) in this tenant, or null.
+async function resolveSelf(
+  tenantId: string,
+  userId: string,
+): Promise<{ id: string; role: string } | null> {
+  const { data, error } = await supabaseAdmin
+    .from("employees")
+    .select("id, role")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .maybeSingle()
+  if (error) throw new Error(`resolve self employee: ${error.message}`)
+  return data ? { id: data.id as string, role: data.role as string } : null
+}
+
+function isHrRole(role: string | undefined): boolean {
+  return !!role && ["hr_admin", "platform_admin"].includes(role)
+}
+
+/**
+ * POST /payroll/run — HR admin runs the monthly payroll for a tenant (or a
+ * single employee). For each in-scope employee it gathers that period's
+ * attendance_days (work_date in the month) + the employee's salary_structure +
+ * the tenant's active rule_config, calls @hr/rules' computePayslip, and upserts
+ * the result into payslips as a 'draft'.
+ *
+ * Scope: with employeeId → just that employee (must have a salary structure in
+ * this tenant); without → every employee in this tenant that has a salary
+ * structure. An already-FINALIZED payslip for the (employee, period) is left
+ * untouched and reported in `skipped` (a finalized slip is locked).
+ *
+ * Returns { generated: N, skipped: string[] } (skipped = employee ids skipped
+ * because their payslip was already finalized).
+ */
+payrollRouter.post(
+  "/payroll/run",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const parsed = runSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    const { employeeId, period } = parsed.data
+    const { first, nextFirst } = monthBounds(period)
+
+    try {
+      // --- tenant rule config (active) or default -----------------------------
+      const { data: cfgRow, error: cfgErr } = await supabaseAdmin
+        .from("rule_configs")
+        .select("config")
+        .eq("tenant_id", tenantId)
+        .eq("active", true)
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (cfgErr) {
+        next(new Error(`POST /payroll/run (rule_config): ${cfgErr.message}`))
+        return
+      }
+      let rules: RuleConfig
+      try {
+        rules = cfgRow?.config ? parseRuleConfig(cfgRow.config) : DEFAULT_RULE_CONFIG
+      } catch {
+        // A malformed stored config should not block payroll — fall back safely.
+        rules = DEFAULT_RULE_CONFIG
+      }
+
+      // --- in-scope salary structures (the run is salary-driven) --------------
+      let salQuery = supabaseAdmin
+        .from("salary_structures")
+        .select("employee_id, method, base_salary, daily_wage, hourly_wage")
+        .eq("tenant_id", tenantId)
+      if (employeeId) salQuery = salQuery.eq("employee_id", employeeId)
+      const { data: salData, error: salErr } = await salQuery
+      if (salErr) {
+        next(new Error(`POST /payroll/run (salaries): ${salErr.message}`))
+        return
+      }
+      const salaries = (salData ?? []) as SalaryRow[]
+      const employeeIds = salaries.map((s) => s.employee_id)
+
+      if (employeeIds.length === 0) {
+        res.status(200).json({ generated: 0, skipped: [] })
+        return
+      }
+
+      // --- this period's attendance_days for those employees ------------------
+      const { data: adData, error: adErr } = await supabaseAdmin
+        .from("attendance_days")
+        .select(
+          "employee_id, work_date, worked_minutes, late_minutes, overtime_minutes, night_minutes, day_type",
+        )
+        .eq("tenant_id", tenantId)
+        .in("employee_id", employeeIds)
+        .gte("work_date", first)
+        .lt("work_date", nextFirst)
+      if (adErr) {
+        next(new Error(`POST /payroll/run (attendance_days): ${adErr.message}`))
+        return
+      }
+      const daysByEmployee = new Map<string, AttendanceDay[]>()
+      for (const row of (adData ?? []) as AttendanceDayRow[]) {
+        const arr = daysByEmployee.get(row.employee_id)
+        const day = toAttendanceDay(row)
+        if (arr) arr.push(day)
+        else daysByEmployee.set(row.employee_id, [day])
+      }
+
+      // --- already-finalized payslips for this period (locked, skip) ----------
+      const { data: finData, error: finErr } = await supabaseAdmin
+        .from("payslips")
+        .select("employee_id, status")
+        .eq("tenant_id", tenantId)
+        .in("employee_id", employeeIds)
+        .eq("period", period)
+        .eq("status", "finalized")
+      if (finErr) {
+        next(new Error(`POST /payroll/run (finalized check): ${finErr.message}`))
+        return
+      }
+      const finalized = new Set((finData ?? []).map((r) => r.employee_id as string))
+
+      // --- compute + upsert each employee's payslip ---------------------------
+      const skipped: string[] = []
+      const rows: Array<Record<string, unknown>> = []
+      const now = new Date().toISOString()
+      for (const sal of salaries) {
+        if (finalized.has(sal.employee_id)) {
+          skipped.push(sal.employee_id)
+          continue
+        }
+        const days = daysByEmployee.get(sal.employee_id) ?? []
+        const breakdown = computePayslip(days, toSalaryStructure(sal), rules)
+        rows.push({
+          tenant_id: tenantId,
+          employee_id: sal.employee_id,
+          period,
+          base: breakdown.base,
+          overtime_pay: breakdown.overtimePay,
+          night_pay: breakdown.nightPay,
+          attendance_bonus: breakdown.attendanceBonus,
+          gross: breakdown.gross,
+          breakdown,
+          status: "draft",
+          updated_at: now,
+        })
+      }
+
+      if (rows.length > 0) {
+        const { error: upErr } = await supabaseAdmin
+          .from("payslips")
+          .upsert(rows, { onConflict: "tenant_id,employee_id,period" })
+        if (upErr) {
+          next(new Error(`POST /payroll/run (upsert): ${upErr.message}`))
+          return
+        }
+      }
+
+      res.status(201).json({ generated: rows.length, skipped })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * GET /payslips?employeeId=&period= — list payslips.
+ *
+ * Role-based scoping on top of the always-on tenant filter:
+ *   • HR admin / platform admin → whole tenant; honours an optional employeeId.
+ *   • Any other role → forced to their OWN employee row regardless of the
+ *     employeeId param (passing someone else's id reveals nothing).
+ *
+ * Uses supabaseAdmin (bypasses RLS); the explicit filters are the load-bearing
+ * guard. Optional period filters to a single 'YYYY-MM'.
+ */
+payrollRouter.get(
+  "/payslips",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+
+    const parsed = listQuerySchema.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_query", details: parsed.error.flatten() })
+      return
+    }
+    const { employeeId, period } = parsed.data
+
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      const isHr = isHrRole(self?.role)
+
+      let query = supabaseAdmin.from("payslips").select(SELECT_COLS).eq("tenant_id", tenantId)
+
+      if (isHr) {
+        if (employeeId) query = query.eq("employee_id", employeeId)
+      } else {
+        // Non-HR: always pinned to self. No employee row → impossible filter →
+        // empty result (never another user's data).
+        query = query.eq("employee_id", self?.id ?? "00000000-0000-0000-0000-000000000000")
+      }
+
+      if (period) query = query.eq("period", period)
+
+      const { data, error } = await query.order("period", { ascending: false })
+      if (error) {
+        next(new Error(`GET /payslips: ${error.message}`))
+        return
+      }
+      res.status(200).json({ payslips: data ?? [] })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * GET /payslips/:id — a single payslip with its full breakdown.
+ *
+ * Visible to the owning employee or any HR admin in the tenant; anyone else (or
+ * a cross-tenant id) gets 404 (not 403 — we don't reveal existence). The tenant
+ * + ownership filter is the load-bearing guard (supabaseAdmin bypasses RLS).
+ */
+payrollRouter.get(
+  "/payslips/:id",
+  requireAuth,
+  requireTenant,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const userId = req.auth?.userId
+    if (!userId) {
+      res.status(401).json({ error: "unauthorized" })
+      return
+    }
+    const { id } = req.params
+
+    try {
+      const self = await resolveSelf(tenantId, userId)
+      const isHr = isHrRole(self?.role)
+
+      const { data, error } = await supabaseAdmin
+        .from("payslips")
+        .select(SELECT_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (error) {
+        next(new Error(`GET /payslips/${id}: ${error.message}`))
+        return
+      }
+
+      // Not found, or found but not the caller's and caller isn't HR → 404.
+      if (!data || (!isHr && data.employee_id !== self?.id)) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      res.status(200).json({ payslip: data })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /payslips/:id/finalize — HR admin locks a draft payslip
+ * (status draft → finalized). A finalized payslip is excluded from future
+ * payroll runs (they skip it). Already-finalized → 409; missing/cross-tenant →
+ * 404. Tenant-scoped via res.locals.tenantId.
+ */
+payrollRouter.post(
+  "/payslips/:id/finalize",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const { id } = req.params
+
+    try {
+      const { data: existing, error: selErr } = await supabaseAdmin
+        .from("payslips")
+        .select("id, status")
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (selErr) {
+        next(new Error(`POST /payslips/${id}/finalize (select): ${selErr.message}`))
+        return
+      }
+      if (!existing) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      if (existing.status === "finalized") {
+        res.status(409).json({ error: "already_finalized" })
+        return
+      }
+
+      const { data: updated, error: updErr } = await supabaseAdmin
+        .from("payslips")
+        .update({ status: "finalized", updated_at: new Date().toISOString() })
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .select("id, status")
+        .single()
+      if (updErr || !updated) {
+        next(new Error(`POST /payslips/${id}/finalize (update): ${updErr?.message}`))
+        return
+      }
+      res.status(200).json({ id: updated.id, status: updated.status })
+    } catch (err) {
+      next(err)
+    }
+  },
+)

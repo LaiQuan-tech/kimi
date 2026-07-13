@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    // Resolve @hr/* workspace packages through node_modules (their built
+    // dist + types via package "exports"), NOT the repo-root source paths.
+    // This keeps the API's emitted dist consuming @hr/rules exactly the way
+    // Node will at runtime (apps/api/dist → node_modules/@hr/rules/dist), and
+    // avoids pulling package source .ts into this program's rootDir.
+    "baseUrl": ".",
+    "paths": {}
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

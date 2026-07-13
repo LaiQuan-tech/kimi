@@ -1,0 +1,892 @@
+import { describe, it, expect, beforeAll, afterAll } from "vitest"
+import { createClient } from "@supabase/supabase-js"
+import request from "supertest"
+// .env is loaded by the vitest setupFile (src/__tests__/setup.ts) before this
+// module is imported, so the eagerly-constructed clients below have real creds.
+import { supabaseAdmin } from "../lib/supabase"
+import { provisionTenant } from "../services/tenants"
+import { app } from "../app"
+
+const SUPABASE_URL = process.env.SUPABASE_URL ?? ""
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY ?? ""
+
+const stamp = Date.now()
+const createdUserIds: string[] = []
+const createdTenantIds: string[] = []
+
+interface Tenant {
+  name: string
+  tenantId: string
+  adminEmail: string
+  adminPassword: string
+  adminToken: string
+  // The hr_admin's own employee row id in this tenant (provisionTenant creates it).
+  hrEmpId: string
+}
+
+let A: Tenant
+let B: Tenant
+
+// Tenant A cast:
+//   emp1 — the protagonist who files requests (role 'employee').
+//   mgr  — first-line approver (role 'manager').
+//   emp2 — an unrelated third employee; must never see emp1's requests.
+let emp1Id: string
+let emp1Token: string
+let mgrId: string
+let mgrToken: string
+let emp2Token: string
+
+async function signIn(email: string, password: string): Promise<string> {
+  const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false },
+  })
+  const { data, error } = await anon.auth.signInWithPassword({ email, password })
+  if (error || !data.session) {
+    throw new Error(`signIn(${email}) failed: ${error?.message}`)
+  }
+  return data.session.access_token
+}
+
+async function buildTenant(label: string): Promise<Tenant> {
+  const name = `REQTEST ${label} ${stamp}`
+  const adminEmail = `req-${stamp}-${label}-admin@example.com`
+  const adminPassword = `Pw-${stamp}-${label}-Aa1!`
+
+  const { tenantId, userId } = await provisionTenant({ name, adminEmail, adminPassword })
+  createdTenantIds.push(tenantId)
+  createdUserIds.push(userId)
+
+  const adminToken = await signIn(adminEmail, adminPassword)
+
+  // Resolve the admin's own employee row id (provisionTenant seeds it as hr_admin).
+  const { data: hrEmp, error: hrErr } = await supabaseAdmin
+    .from("employees")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .single()
+  if (hrErr || !hrEmp) {
+    throw new Error(`buildTenant(${label}): resolve hr employee failed: ${hrErr?.message}`)
+  }
+
+  return { name, tenantId, adminEmail, adminPassword, adminToken, hrEmpId: hrEmp.id as string }
+}
+
+// Create an employee with a real auth user (so they have a token) under a tenant.
+async function createEmployee(
+  adminToken: string,
+  email: string,
+  password: string,
+  name: string,
+  role: string,
+): Promise<{ employeeId: string; token: string }> {
+  const res = await request(app)
+    .post("/employees")
+    .set("Authorization", `Bearer ${adminToken}`)
+    .send({ email, name, password, role })
+  if (res.status !== 201) {
+    throw new Error(`createEmployee(${email}) failed (${res.status}): ${JSON.stringify(res.body)}`)
+  }
+  createdUserIds.push(res.body.userId)
+  const token = await signIn(email, password)
+  return { employeeId: res.body.employeeId, token }
+}
+
+beforeAll(async () => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("SUPABASE_URL / SUPABASE_ANON_KEY missing — cannot run requests test")
+  }
+
+  A = await buildTenant("A")
+  B = await buildTenant("B")
+
+  const e1 = await createEmployee(
+    A.adminToken,
+    `req-${stamp}-a-emp1@example.com`,
+    `Pw-${stamp}-emp1-Bb2!`,
+    "Alice One",
+    "employee",
+  )
+  emp1Id = e1.employeeId
+  emp1Token = e1.token
+
+  const m = await createEmployee(
+    A.adminToken,
+    `req-${stamp}-a-mgr@example.com`,
+    `Pw-${stamp}-mgr-Cc3!`,
+    "Mona Manager",
+    "manager",
+  )
+  mgrId = m.employeeId
+  mgrToken = m.token
+
+  const e2 = await createEmployee(
+    A.adminToken,
+    `req-${stamp}-a-emp2@example.com`,
+    `Pw-${stamp}-emp2-Dd4!`,
+    "Bob Two",
+    "employee",
+  )
+  emp2Token = e2.token
+}, 60_000)
+
+afterAll(async () => {
+  // comp_time_ledger / leave_balances → approval_steps → leave_requests →
+  // approval_flows → leave_types → employees → tenants → auth users (FK order).
+  // The ledger rows are written by approval side-effects (a final approval of a
+  // leave/OT request) and reference leave_requests/leave_types/employees, so
+  // they must be cleared before those parents.
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("comp_time_ledger").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("leave_balances").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("request_attachments").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("approval_steps").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("leave_requests").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("approval_flows").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("leave_types").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("punch_records").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("employees").delete().eq("tenant_id", tid)
+  }
+  for (const tid of createdTenantIds) {
+    await supabaseAdmin.from("tenants").delete().eq("id", tid)
+  }
+  for (const uid of createdUserIds) {
+    await supabaseAdmin.auth.admin.deleteUser(uid)
+  }
+}, 60_000)
+
+// Shared across tests within a tenant's lifecycle.
+let annualTypeId: string
+
+describe("F4 leave_types — HR manages the catalogue", () => {
+  it("HR POST /leave-types creates 'annual'; GET lists it", async () => {
+    const res = await request(app)
+      .post("/leave-types")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ code: "annual", name: "特休", paid: true })
+
+    expect(res.status).toBe(201)
+    expect(typeof res.body.id).toBe("string")
+    annualTypeId = res.body.id
+
+    const list = await request(app)
+      .get("/leave-types")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(list.status).toBe(200)
+    const types = list.body.leaveTypes as Array<{ id: string; code: string; tenant_id: string }>
+    expect(types.some((t) => t.id === annualTypeId && t.code === "annual")).toBe(true)
+    expect(types.every((t) => t.tenant_id === A.tenantId)).toBe(true)
+  })
+
+  it("a normal employee cannot create leave types → 403", async () => {
+    const res = await request(app)
+      .post("/leave-types")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ code: "sick", name: "病假", paid: false })
+    expect(res.status).toBe(403)
+  })
+
+  it("HR creates a 特殊假別 (special=true); ?special=true lists it, ?special=false excludes it", async () => {
+    const created = await request(app)
+      .post("/leave-types")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ code: "menstrual", name: "生理假", paid: false, special: true })
+    expect(created.status).toBe(201)
+    const specialId = created.body.id as string
+
+    const special = await request(app)
+      .get("/leave-types?special=true")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(special.status).toBe(200)
+    const specials = special.body.leaveTypes as Array<{ id: string; special: boolean }>
+    expect(specials.some((t) => t.id === specialId)).toBe(true)
+    expect(specials.every((t) => t.special === true)).toBe(true)
+
+    const ordinary = await request(app)
+      .get("/leave-types?special=false")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(ordinary.status).toBe(200)
+    const ordinaries = ordinary.body.leaveTypes as Array<{ id: string; special: boolean }>
+    expect(ordinaries.some((t) => t.id === specialId)).toBe(false)
+    // The earlier 'annual' type (special defaults false) is ordinary.
+    expect(ordinaries.some((t) => t.id === annualTypeId)).toBe(true)
+  })
+})
+
+describe("F4 approval_flows — HR configures approver chains", () => {
+  it("HR PUT /approval-flows/leave sets a single-step chain [mgr]", async () => {
+    const res = await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+    expect(res.status).toBe(200)
+    expect(res.body.approverEmpIds).toEqual([mgrId])
+
+    // GET /approval-flows lists it back.
+    const list = await request(app)
+      .get("/approval-flows")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(list.status).toBe(200)
+    const flows = list.body.flows as Array<{ applies_to: string; approver_emp_ids: string[] }>
+    const leave = flows.find((f) => f.applies_to === "leave")
+    expect(leave?.approver_emp_ids).toEqual([mgrId])
+  })
+
+  it("a normal employee cannot configure flows → 403", async () => {
+    const res = await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ approverEmpIds: [] })
+    expect(res.status).toBe(403)
+  })
+})
+
+describe("F4 single-step approval — file, authorise, approve", () => {
+  let reqId: string
+
+  it("emp1 POST /requests (leave) → 201 pending with one step (approver=mgr)", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-07-01T01:00:00.000Z",
+        endAt: "2026-07-01T09:00:00.000Z",
+        hours: 8,
+        reason: "family",
+      })
+    expect(res.status).toBe(201)
+    expect(typeof res.body.requestId).toBe("string")
+    reqId = res.body.requestId
+    const steps = res.body.steps as Array<{ stepOrder: number; approverEmpId: string }>
+    expect(steps.length).toBe(1)
+    expect(steps[0].stepOrder).toBe(1)
+    expect(steps[0].approverEmpId).toBe(mgrId)
+
+    // Row state: pending, current_step 1, belongs to emp1 in tenant A.
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("tenant_id, employee_id, status, current_step")
+      .eq("id", reqId)
+      .single()
+    expect(data?.tenant_id).toBe(A.tenantId)
+    expect(data?.employee_id).toBe(emp1Id)
+    expect(data?.status).toBe("pending")
+    expect(data?.current_step).toBe(1)
+  })
+
+  it("emp1 (not the current approver) cannot approve → 403", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({})
+    expect(res.status).toBe(403)
+  })
+
+  it("mgr approves the single step → request approved", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "ok" })
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("approved")
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("status")
+      .eq("id", reqId)
+      .single()
+    expect(data?.status).toBe("approved")
+
+    const { data: step } = await supabaseAdmin
+      .from("approval_steps")
+      .select("decision, comment, acted_at")
+      .eq("request_id", reqId)
+      .eq("step_order", 1)
+      .single()
+    expect(step?.decision).toBe("approved")
+    expect(step?.comment).toBe("ok")
+    expect(step?.acted_at).toBeTruthy()
+  })
+
+  it("approving an already-approved request → 409", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(res.status).toBe(409)
+  })
+})
+
+describe("F4 multi-step approval — advances through the chain", () => {
+  let reqId: string
+
+  it("HR sets a two-step chain [mgr, hrEmp]", async () => {
+    const res = await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId, A.hrEmpId] })
+    expect(res.status).toBe(200)
+    expect(res.body.approverEmpIds).toEqual([mgrId, A.hrEmpId])
+  })
+
+  it("emp1 files a new leave request → two steps created", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-08-01T01:00:00.000Z",
+        endAt: "2026-08-02T09:00:00.000Z",
+      })
+    expect(res.status).toBe(201)
+    reqId = res.body.requestId
+    const steps = res.body.steps as Array<{ stepOrder: number; approverEmpId: string }>
+    expect(steps.map((s) => s.approverEmpId)).toEqual([mgrId, A.hrEmpId])
+  })
+
+  it("step 1 (mgr) approves → still pending, current_step advances to 2", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("pending")
+    expect(res.body.currentStep).toBe(2)
+
+    // The HR-step approver cannot be jumped: mgr can no longer act now.
+    const again = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(again.status).toBe(403)
+  })
+
+  it("step 2 (hrEmp) approves → request approved", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("approved")
+  })
+})
+
+describe("F4 rejection — any step rejecting ends the request", () => {
+  it("mgr rejects a fresh single-step request → rejected", async () => {
+    // Reset to single-step for clarity.
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-09-01T01:00:00.000Z",
+        endAt: "2026-09-01T09:00:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId
+
+    const res = await request(app)
+      .post(`/requests/${reqId}/reject`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "no" })
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("rejected")
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("status")
+      .eq("id", reqId)
+      .single()
+    expect(data?.status).toBe("rejected")
+
+    const { data: step } = await supabaseAdmin
+      .from("approval_steps")
+      .select("decision, comment")
+      .eq("request_id", reqId)
+      .eq("step_order", 1)
+      .single()
+    expect(step?.decision).toBe("rejected")
+    expect(step?.comment).toBe("no")
+  })
+})
+
+describe("F4 default flow — no configured chain falls back to an HR admin", () => {
+  it("emp1 files an OT request (ot flow empty) → single step approver is an hr_admin", async () => {
+    // Ensure the ot flow is empty/unset.
+    await request(app)
+      .put("/approval-flows/ot")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "ot",
+        startAt: "2026-10-01T10:00:00.000Z",
+        endAt: "2026-10-01T12:00:00.000Z",
+        hours: 2,
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId
+    const steps = filed.body.steps as Array<{ approverEmpId: string }>
+    expect(steps.length).toBe(1)
+    // The fallback approver is the tenant's hr_admin (the provisioned admin).
+    expect(steps[0].approverEmpId).toBe(A.hrEmpId)
+
+    // That hr_admin can approve it through.
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("approved")
+  })
+})
+
+describe("F4 cancel — the filer can cancel a pending request", () => {
+  let reqId: string
+
+  it("emp1 cancels their own pending request → cancelled", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-11-01T01:00:00.000Z",
+        endAt: "2026-11-01T09:00:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    reqId = filed.body.requestId
+
+    const res = await request(app)
+      .post(`/requests/${reqId}/cancel`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("cancelled")
+  })
+
+  it("approving an already-cancelled request → 409", async () => {
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(res.status).toBe(409)
+  })
+})
+
+describe("F4 GET /requests — role-based visibility", () => {
+  it("mgr sees requests where it is their turn to approve", async () => {
+    // File a fresh single-step (mgr) request so there is a pending one for mgr.
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2026-12-01T01:00:00.000Z",
+        endAt: "2026-12-01T09:00:00.000Z",
+      })
+    const pendingForMgr = filed.body.requestId as string
+
+    const res = await request(app)
+      .get("/requests")
+      .set("Authorization", `Bearer ${mgrToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ id: string }>
+    expect(items.some((r) => r.id === pendingForMgr)).toBe(true)
+  })
+
+  it("HR sees every request in the tenant", async () => {
+    const res = await request(app)
+      .get("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ tenant_id: string }>
+    expect(items.length).toBeGreaterThan(0)
+    expect(items.every((r) => r.tenant_id === A.tenantId)).toBe(true)
+  })
+
+  it("an unrelated employee (emp2) sees none of emp1's requests", async () => {
+    const res = await request(app)
+      .get("/requests")
+      .set("Authorization", `Bearer ${emp2Token}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ employee_id: string }>
+    expect(items.some((r) => r.employee_id === emp1Id)).toBe(false)
+  })
+
+  it("?status=pending filters to pending requests only", async () => {
+    const res = await request(app)
+      .get("/requests?status=pending")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ status: string }>
+    expect(items.every((r) => r.status === "pending")).toBe(true)
+  })
+})
+
+describe("F4 公出/出差 — business_trip rides the same approval pipeline", () => {
+  it("emp1 files a business_trip; mgr approves it through to approved", async () => {
+    // Single-step chain [mgr].
+    await request(app)
+      .put("/approval-flows/business_trip")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "business_trip",
+        startAt: "2027-01-05T01:00:00.000Z",
+        endAt: "2027-01-05T09:00:00.000Z",
+        reason: "client visit",
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId as string
+    const steps = filed.body.steps as Array<{ approverEmpId: string }>
+    expect(steps.map((s) => s.approverEmpId)).toEqual([mgrId])
+
+    const res = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({ comment: "go" })
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe("approved")
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("kind, status")
+      .eq("id", reqId)
+      .single()
+    expect(data?.kind).toBe("business_trip")
+    expect(data?.status).toBe("approved")
+  })
+
+  it("an unknown kind is still rejected → 400", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "vacation_on_mars",
+        startAt: "2027-02-01T01:00:00.000Z",
+        endAt: "2027-02-01T09:00:00.000Z",
+      })
+    expect(res.status).toBe(400)
+  })
+})
+
+describe("F4 Apollo form-parity — payout / trip extras", () => {
+  it("business_trip stores tripType/location/remark/agentName and returns them on GET", async () => {
+    await request(app)
+      .put("/approval-flows/business_trip")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "business_trip",
+        startAt: "2027-03-01T01:00:00.000Z",
+        endAt: "2027-03-02T09:00:00.000Z",
+        tripType: "business_trip",
+        location: "台中客戶端",
+        remark: "含路程",
+        agentName: "B0001/王代理",
+        reason: "客戶商討",
+      })
+    expect(filed.status).toBe(201)
+
+    const list = await request(app).get("/requests").set("Authorization", `Bearer ${emp1Token}`)
+    const row = (list.body.requests as Array<Record<string, unknown>>).find(
+      (r) => r.id === filed.body.requestId,
+    )
+    expect(row?.trip_type).toBe("business_trip")
+    expect(row?.location).toBe("台中客戶端")
+    expect(row?.remark).toBe("含路程")
+    expect(row?.agent_name).toBe("B0001/王代理")
+  })
+
+  it("OT payout='pay' → NO comp-time credit on approval", async () => {
+    await request(app)
+      .put("/approval-flows/ot")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-04-01T10:00:00.000Z",
+        endAt: "2027-04-01T12:00:00.000Z",
+        hours: 2,
+        payout: "pay",
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId as string
+
+    const ok = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(ok.status).toBe(200)
+
+    const { data } = await supabaseAdmin
+      .from("comp_time_ledger")
+      .select("id")
+      .eq("source_request_id", reqId)
+    expect(data?.length ?? 0).toBe(0)
+  })
+
+  it("OT payout='comp_time' → comp-time credited on approval", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "ot",
+        startAt: "2027-04-02T10:00:00.000Z",
+        endAt: "2027-04-02T12:00:00.000Z",
+        hours: 2,
+        payout: "comp_time",
+      })
+    expect(filed.status).toBe(201)
+    const reqId = filed.body.requestId as string
+
+    const ok = await request(app)
+      .post(`/requests/${reqId}/approve`)
+      .set("Authorization", `Bearer ${mgrToken}`)
+      .send({})
+    expect(ok.status).toBe(200)
+
+    const { data } = await supabaseAdmin
+      .from("comp_time_ledger")
+      .select("hours_earned")
+      .eq("source_request_id", reqId)
+      .single()
+    expect(Number(data?.hours_earned)).toBe(2)
+  })
+})
+
+describe("F3 打卡補登 — POST /punch/manual (HR only)", () => {
+  it("HR back-fills a punch for an employee → 201, source='manual'", async () => {
+    const res = await request(app)
+      .post("/punch/manual")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ employeeId: emp1Id, punchAt: "2027-05-01T01:00:00.000Z", type: "in" })
+    expect(res.status).toBe(201)
+    const { data } = await supabaseAdmin
+      .from("punch_records")
+      .select("employee_id, source, type")
+      .eq("id", res.body.id)
+      .single()
+    expect(data?.employee_id).toBe(emp1Id)
+    expect(data?.source).toBe("manual")
+    expect(data?.type).toBe("in")
+  })
+
+  it("a normal employee cannot back-fill → 403; unknown employee → 404", async () => {
+    const denied = await request(app)
+      .post("/punch/manual")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ employeeId: emp1Id, punchAt: "2027-05-01T02:00:00.000Z", type: "out" })
+    expect(denied.status).toBe(403)
+
+    const missing = await request(app)
+      .post("/punch/manual")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        employeeId: "00000000-0000-0000-0000-000000000000",
+        punchAt: "2027-05-01T02:00:00.000Z",
+        type: "out",
+      })
+    expect(missing.status).toBe(404)
+  })
+})
+
+describe("F4 代申請 + 多段日期 (gap A/C)", () => {
+  it("HR files a leave ON BEHALF of emp1 with segments → owned by emp1", async () => {
+    await request(app)
+      .put("/approval-flows/leave")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({ approverEmpIds: [mgrId] })
+
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        onBehalfOfEmployeeId: emp1Id,
+        startAt: "2027-06-01T01:00:00.000Z",
+        endAt: "2027-06-02T09:00:00.000Z",
+        hours: 16,
+        segments: [
+          { date: "2027-06-01", startTime: "09:00", endTime: "18:00", hours: 8 },
+          { date: "2027-06-02", startTime: "09:00", endTime: "18:00", hours: 8 },
+        ],
+      })
+    expect(filed.status).toBe(201)
+
+    const { data } = await supabaseAdmin
+      .from("leave_requests")
+      .select("employee_id, segments")
+      .eq("id", filed.body.requestId)
+      .single()
+    expect(data?.employee_id).toBe(emp1Id)
+    expect(Array.isArray(data?.segments)).toBe(true)
+    expect((data?.segments as unknown[]).length).toBe(2)
+  })
+
+  it("a normal employee cannot file on behalf of others → 403", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        onBehalfOfEmployeeId: mgrId,
+        startAt: "2027-06-03T01:00:00.000Z",
+        endAt: "2027-06-03T09:00:00.000Z",
+      })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe("proxy_filing_requires_hr")
+  })
+
+  it("HR proxy-filing for a non-existent employee → 404", async () => {
+    const res = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        onBehalfOfEmployeeId: "00000000-0000-0000-0000-000000000000",
+        startAt: "2027-06-04T01:00:00.000Z",
+        endAt: "2027-06-04T09:00:00.000Z",
+      })
+    expect(res.status).toBe(404)
+  })
+})
+
+describe("F4 附件上傳 (gap D)", () => {
+  let reqId: string
+  const b64 = Buffer.from("hello attachment").toString("base64")
+
+  it("filer uploads an attachment; list returns a signed URL", async () => {
+    const filed = await request(app)
+      .post("/requests")
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({
+        kind: "leave",
+        leaveTypeId: annualTypeId,
+        startAt: "2027-07-01T01:00:00.000Z",
+        endAt: "2027-07-01T09:00:00.000Z",
+      })
+    expect(filed.status).toBe(201)
+    reqId = filed.body.requestId
+
+    const up = await request(app)
+      .post(`/requests/${reqId}/attachments`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ fileName: "診斷證明.txt", contentType: "text/plain", dataBase64: b64 })
+    expect(up.status).toBe(201)
+    expect(up.body.sizeBytes).toBe(16)
+
+    const list = await request(app)
+      .get(`/requests/${reqId}/attachments`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+    expect(list.status).toBe(200)
+    expect(list.body.attachments.length).toBe(1)
+    expect(list.body.attachments[0].fileName).toBe("診斷證明.txt")
+    expect(String(list.body.attachments[0].url)).toContain("http")
+  })
+
+  it("an unrelated employee cannot see the attachments → 403", async () => {
+    const res = await request(app)
+      .get(`/requests/${reqId}/attachments`)
+      .set("Authorization", `Bearer ${emp2Token}`)
+    expect(res.status).toBe(403)
+  })
+
+  it("4th file → 409 max_files_reached", async () => {
+    for (let i = 0; i < 2; i++) {
+      const r = await request(app)
+        .post(`/requests/${reqId}/attachments`)
+        .set("Authorization", `Bearer ${emp1Token}`)
+        .send({ fileName: `f${i}.txt`, contentType: "text/plain", dataBase64: b64 })
+      expect(r.status).toBe(201)
+    }
+    const fourth = await request(app)
+      .post(`/requests/${reqId}/attachments`)
+      .set("Authorization", `Bearer ${emp1Token}`)
+      .send({ fileName: "f3.txt", contentType: "text/plain", dataBase64: b64 })
+    expect(fourth.status).toBe(409)
+  })
+})
+
+describe("F4 cross-tenant isolation", () => {
+  it("A's HR can never see any of B's requests", async () => {
+    // Seed a request in tenant B directly (rows only — no token needed).
+    const { data: bReq, error: bErr } = await supabaseAdmin
+      .from("leave_requests")
+      .insert({
+        tenant_id: B.tenantId,
+        employee_id: B.hrEmpId,
+        kind: "ot",
+        start_at: "2026-07-01T10:00:00.000Z",
+        end_at: "2026-07-01T12:00:00.000Z",
+        status: "pending",
+        current_step: 1,
+      })
+      .select("id")
+      .single()
+    if (bErr || !bReq) throw new Error(`seed B request failed: ${bErr?.message}`)
+
+    const res = await request(app)
+      .get("/requests")
+      .set("Authorization", `Bearer ${A.adminToken}`)
+    expect(res.status).toBe(200)
+    const items = res.body.requests as Array<{ id: string; tenant_id: string }>
+    expect(items.every((r) => r.tenant_id === A.tenantId)).toBe(true)
+    expect(items.some((r) => r.id === bReq.id)).toBe(false)
+  })
+})

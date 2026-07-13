@@ -1,0 +1,20 @@
+{
+  "name": "@hr/db",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.36",
+    "postgres": "^3",
+    "@supabase/supabase-js": "^2"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.28"
+  }
+}

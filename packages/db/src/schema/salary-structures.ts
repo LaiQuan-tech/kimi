@@ -1,0 +1,40 @@
+import { pgTable, uuid, text, numeric, jsonb, timestamp, uniqueIndex } from "drizzle-orm/pg-core"
+import { tenants } from "./tenants"
+import { employees } from "./employees"
+
+/**
+ * Salary structures — one row per employee describing how they are paid.
+ * `method` ('monthly' | 'by_attendance_days') mirrors RuleConfig.payroll.method
+ * and may override it per employee. `hourlyWage` (required, default 0) is the
+ * base rate the engine折算s overtime/night against; `baseSalary` feeds 月薪 base,
+ * `dailyWage` feeds 按出勤天數 base. `allowances` is an open jsonb bag of fixed
+ * add-ons. The unique (tenant_id, employee_id) index makes "one structure per
+ * employee" a DB invariant and powers the upsert in the salary API.
+ */
+export const salaryStructures = pgTable(
+  "salary_structures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    employeeId: uuid("employee_id")
+      .notNull()
+      .references(() => employees.id),
+    method: text("method").notNull().default("monthly"),
+    baseSalary: numeric("base_salary"),
+    dailyWage: numeric("daily_wage"),
+    hourlyWage: numeric("hourly_wage").notNull().default("0"),
+    allowances: jsonb("allowances").notNull().default({}),
+    // 投保級距 (Apollo 保險資料): 勞保/健保投保金額 per government brackets.
+    laborInsuredSalary: numeric("labor_insured_salary"),
+    healthInsuredSalary: numeric("health_insured_salary"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantEmployeeUnique: uniqueIndex("salary_structures_tenant_employee_uq").on(
+      table.tenantId,
+      table.employeeId,
+    ),
+  }),
+)

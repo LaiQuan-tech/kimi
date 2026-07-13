@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  /* --brand is injected per-tenant on <html> by the root layout. This is the
+     fallback default so styles using var(--brand) still resolve if the inline
+     style is ever missing. */
+  --brand: #1f4e79;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+}
+
+@media (max-width: 767px) {
+  .admin-shell table {
+    min-width: 720px;
+  }
+
+  .admin-shell th,
+  .admin-shell td {
+    white-space: nowrap;
+  }
+}

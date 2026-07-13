@@ -1,0 +1,111 @@
+import { Router, type Request, type Response, type NextFunction } from "express"
+import { z } from "zod"
+import { requireAuth } from "../middleware/auth.js"
+import { requireTenant } from "../middleware/tenant.js"
+import { requireHrAdmin } from "../middleware/role.js"
+import { supabaseAdmin } from "../lib/supabase.js"
+
+export const salaryRouter = Router()
+
+const SELECT_COLS =
+  "id, tenant_id, employee_id, method, base_salary, daily_wage, hourly_wage, allowances, labor_insured_salary, health_insured_salary, created_at"
+
+// Numeric columns are returned by PostgREST as strings; the client coerces.
+const upsertSchema = z
+  .object({
+    method: z.enum(["monthly", "by_attendance_days"]).optional(),
+    baseSalary: z.number().nullable().optional(),
+    dailyWage: z.number().nullable().optional(),
+    hourlyWage: z.number().optional(),
+    allowances: z.record(z.unknown()).optional(),
+    laborInsuredSalary: z.number().nullable().optional(),
+    healthInsuredSalary: z.number().nullable().optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
+
+/**
+ * Salary structures are HR-admin-only and tenant-scoped. The tenant filter on
+ * every query is the load-bearing guard (supabaseAdmin bypasses RLS), so an HR
+ * admin can only ever read/write salaries inside their own tenant. The
+ * employeeId is taken from the path and always written under THIS tenant_id, so
+ * a cross-tenant id cannot leak another tenant's data.
+ */
+
+// GET /salary/:employeeId — this tenant's structure for the employee, or 404.
+salaryRouter.get(
+  "/salary/:employeeId",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const { employeeId } = req.params
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("salary_structures")
+        .select(SELECT_COLS)
+        .eq("tenant_id", tenantId)
+        .eq("employee_id", employeeId)
+        .maybeSingle()
+
+      if (error) {
+        next(new Error(`GET /salary/${employeeId}: ${error.message}`))
+        return
+      }
+      if (!data) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      res.status(200).json({ salary: data })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// PUT /salary/:employeeId — upsert the structure (one per tenant+employee).
+salaryRouter.put(
+  "/salary/:employeeId",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const { employeeId } = req.params
+    const parsed = upsertSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+
+    const row: Record<string, unknown> = {
+      tenant_id: tenantId,
+      employee_id: employeeId,
+    }
+    if (parsed.data.method !== undefined) row.method = parsed.data.method
+    if (parsed.data.baseSalary !== undefined) row.base_salary = parsed.data.baseSalary
+    if (parsed.data.dailyWage !== undefined) row.daily_wage = parsed.data.dailyWage
+    if (parsed.data.hourlyWage !== undefined) row.hourly_wage = parsed.data.hourlyWage
+    if (parsed.data.allowances !== undefined) row.allowances = parsed.data.allowances
+    if (parsed.data.laborInsuredSalary !== undefined)
+      row.labor_insured_salary = parsed.data.laborInsuredSalary
+    if (parsed.data.healthInsuredSalary !== undefined)
+      row.health_insured_salary = parsed.data.healthInsuredSalary
+
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("salary_structures")
+        .upsert(row, { onConflict: "tenant_id,employee_id" })
+        .select("id")
+        .single()
+
+      if (error || !data) {
+        next(new Error(`PUT /salary/${employeeId}: ${error?.message}`))
+        return
+      }
+      res.status(200).json({ id: data.id })
+    } catch (err) {
+      next(err)
+    }
+  },
+)

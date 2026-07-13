@@ -1,0 +1,1 @@
+ALTER TABLE "leave_types" ADD COLUMN "special" boolean DEFAULT false NOT NULL;

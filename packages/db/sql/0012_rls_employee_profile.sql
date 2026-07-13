@@ -1,0 +1,18 @@
+-- =====================================================================
+-- 0012  RLS for employee profile tables — My Data 履歷 的 DB 層兜底防線
+-- employee_profiles / _educations / _certifications / _work_history。
+-- 模型：本人（該 employee 的 user）或 HR 可讀寫；service_role BYPASS。
+-- SELF = employee_id 屬於目前使用者在本租戶的 employee 列。冪等可重跑。
+-- 套用：Supabase Management API /database/query（單語句逐條）。
+-- =====================================================================
+-- 對每個 <T> in (employee_profiles, employee_educations,
+-- employee_certifications, employee_work_history) 套用：
+--
+-- ALTER TABLE public.<T> ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY <T>_self_or_hr_read ON public.<T> FOR SELECT USING (
+--   tenant_id = public.current_tenant_id() AND (
+--     employee_id IN (SELECT id FROM public.employees
+--       WHERE user_id = auth.uid() AND tenant_id = public.current_tenant_id())
+--     OR public.is_hr_admin()));
+-- CREATE POLICY <T>_self_or_hr_write ON public.<T> FOR ALL
+--   USING (<same predicate>) WITH CHECK (<same predicate>);

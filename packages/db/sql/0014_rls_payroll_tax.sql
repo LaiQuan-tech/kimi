@@ -1,0 +1,22 @@
+-- =====================================================================
+-- 0014  RLS for 台灣薪資法規 tables — DB 層兜底防線
+-- nhi_dependents / income_tax_dependents：本人(該 employee)或 HR 可讀寫。
+-- salary_adjustments / non_employee_income：HR-only。
+-- service_role BYPASS RLS；冪等可重跑。套用：Management API /database/query 逐條。
+-- =====================================================================
+-- SELF = employee_id 屬於目前使用者在本租戶的 employee 列。
+--
+-- nhi_dependents / income_tax_dependents 各套 (以 <T> 代):
+--   ALTER TABLE public.<T> ENABLE ROW LEVEL SECURITY;
+--   CREATE POLICY <T>_self_or_hr ON public.<T> FOR ALL
+--     USING (tenant_id = public.current_tenant_id() AND (
+--       employee_id IN (SELECT id FROM public.employees
+--         WHERE user_id = auth.uid() AND tenant_id = public.current_tenant_id())
+--       OR public.is_hr_admin()))
+--     WITH CHECK (<same>);
+--
+-- salary_adjustments / non_employee_income 各套 (以 <T> 代):
+--   ALTER TABLE public.<T> ENABLE ROW LEVEL SECURITY;
+--   CREATE POLICY <T>_hr_all ON public.<T> FOR ALL
+--     USING (tenant_id = public.current_tenant_id() AND public.is_hr_admin())
+--     WITH CHECK (tenant_id = public.current_tenant_id() AND public.is_hr_admin());
