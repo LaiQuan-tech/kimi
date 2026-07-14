@@ -1,53 +1,38 @@
-name: Deploy API to Railway
+name: Deploy API to Vercel
 
-# Web (apps/web) auto-deploys via Vercel's native Git integration.
-# This workflow handles the API (apps/api) because the Railway account is on
-# the free Trial (native auto-deploy gated). It runs `railway up` on push to main.
+# The API runs as a Vercel serverless function (Railway's trial expired, so the
+# original Railway deploy is retired). Same pattern as deploy-web.yml: the runner
+# uploads the checked-out code with the Vercel CLI, which works with a private
+# org repo on the Hobby plan. Deploys the kimi-hr-api project (rootDirectory
+# apps/api; Express app wrapped by apps/api/api/index.js per apps/api/vercel.json).
 on:
   push:
     branches: [main]
     paths:
       - "apps/api/**"
       - "packages/**"
-      - "railway.json"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/deploy-api.yml"
   workflow_dispatch:
 
+concurrency:
+  group: deploy-api
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: team_4meLkHZuHu0i2boCKXLISF8g
+      VERCEL_PROJECT_ID: prj_6KCjz1zkMOXJC5pe3C0lsr76115D
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install Railway CLI
-        run: npm i -g @railway/cli
-      - name: Sync Gemini API key to Railway
-        env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          if [ -z "${GEMINI_API_KEY:-}" ]; then
-            echo "GEMINI_API_KEY GitHub secret is not configured; skipping Railway variable sync."
-            exit 0
-          fi
-          railway link \
-            --project dd181562-df73-4a1d-b4d6-c9f3e4c07e52 \
-            --service b79d9602-745f-46d1-8dfb-cb448feab202 \
-            --environment production
-          printf '%s' "$GEMINI_API_KEY" |
-            railway variable set GEMINI_API_KEY --stdin \
-              --service b79d9602-745f-46d1-8dfb-cb448feab202 \
-              --environment production \
-              --skip-deploys
-      - name: Deploy API to Railway
-        env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-        run: >
-          railway up --ci
-          --project dd181562-df73-4a1d-b4d6-c9f3e4c07e52
-          --service b79d9602-745f-46d1-8dfb-cb448feab202
-          --environment production
+      - name: Install Vercel CLI
+        run: npm i -g vercel
+      - name: Deploy to Vercel (production)
+        run: vercel deploy --prod --token="$VERCEL_TOKEN" --yes
