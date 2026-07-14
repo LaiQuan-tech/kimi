@@ -35,4 +35,9 @@ jobs:
       - name: Install Vercel CLI
         run: npm i -g vercel
       - name: Deploy to Vercel (production)
-        run: vercel deploy --prod --token="$VERCEL_TOKEN" --yes
+        # Drop the checked-out .git so Vercel attributes the deploy to the token
+        # owner (team owner) instead of the commit author, who may not hold a team
+        # seat — otherwise the deploy is BLOCKED with TEAM_ACCESS_REQUIRED.
+        run: |
+          rm -rf .git
+          vercel deploy --prod --token="$VERCEL_TOKEN" --yes
