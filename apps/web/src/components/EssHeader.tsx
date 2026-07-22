@@ -27,6 +27,8 @@ export function EssHeader({
     | "schedule"
     | "payslips"
     | "jobs"
+    | "projects"
+    | "bonus"
     | "ai";
   /** When the signed-in user is an HR/platform admin, show a link to /admin. */
   isAdmin?: boolean;
@@ -53,12 +55,16 @@ export function EssHeader({
       | "schedule"
       | "payslips"
       | "jobs"
+      | "projects"
+      | "bonus"
       | "ai";
     label: string;
     short: string;
     href: string;
   }> = [
     { key: "home", label: "今日打卡", short: "打卡", href: "/ess" },
+    { key: "projects", label: "專案知識庫", short: "專案", href: "/ess/projects" },
+    { key: "bonus", label: "我的分潤", short: "分潤", href: "/ess/my-bonus" },
     { key: "requests", label: "我的申請", short: "申請", href: "/ess/requests" },
     { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
     { key: "schedule", label: "個人班表", short: "班表", href: "/ess/schedule" },

@@ -35,6 +35,8 @@ import { attachmentsRouter } from "./routes/attachments.js"
 import { internalJobsRouter } from "./routes/internal-jobs.js"
 import { personalNotesRouter } from "./routes/personal-notes.js"
 import { preferencesRouter } from "./routes/preferences.js"
+import { projectsRouter } from "./routes/projects.js"
+import { projectDocumentsRouter } from "./routes/project-documents.js"
 
 const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? "http://localhost:3000")
   .split(",")
@@ -51,7 +53,8 @@ app.use(
   }),
 )
 
-app.use(express.json({ limit: "5mb" }))
+// 12mb 容得下專案文件的 base64 上傳（單檔上限 8MB，見 project-documents.ts）。
+app.use(express.json({ limit: "12mb" }))
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" })
@@ -92,6 +95,8 @@ app.use(attachmentsRouter)
 app.use(internalJobsRouter)
 app.use(personalNotesRouter)
 app.use(preferencesRouter)
+app.use(projectsRouter)
+app.use(projectDocumentsRouter)
 
 // 404 fallback.
 app.use((_req: Request, res: Response) => {

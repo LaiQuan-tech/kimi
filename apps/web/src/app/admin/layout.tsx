@@ -25,6 +25,10 @@ const NAV_GROUPS: { title: string; items: { href: string; label: string }[] }[] 
     ],
   },
   {
+    title: "專案",
+    items: [{ href: "/admin/projects", label: "專案獎金分潤" }],
+  },
+  {
     title: "Foundation",
     items: [
       { href: "/admin/onboarding", label: "Hire 報到管理" },

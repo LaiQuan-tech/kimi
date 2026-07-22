@@ -25,11 +25,8 @@ export function getMe() {
   return apiFetch<Me>("/me");
 }
 
-const ADMIN_ROLES = ["hr_admin", "platform_admin"];
-
-export function isAdminRole(role: string | undefined): boolean {
-  return !!role && ADMIN_ROLES.includes(role);
-}
+// 角色判定收斂到 lib/roles.ts；此處 re-export 維持既有 import 相容。
+export { isAdminRole } from "./roles";
 
 export interface BrandingResponse {
   branding: Branding | null;

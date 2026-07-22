@@ -31,6 +31,20 @@ const updateSchema = z
   })
   .refine((b) => Object.keys(b).length > 0, { message: "no fields to update" })
 
+const resetPasswordSchema = z.object({
+  // 未帶則後端產生隨機密碼。
+  password: z.string().min(8, "password must be at least 8 characters").optional(),
+})
+
+/** 產生一組人類可讀但夠強的隨機密碼（供 HR 配發）。 */
+function generatePassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+  const bytes = crypto.getRandomValues(new Uint8Array(14))
+  let out = ""
+  for (const b of bytes) out += alphabet[b % alphabet.length]
+  return `Kimi-${out}`
+}
+
 /**
  * GET /employees — list the calling HR admin's own-tenant employees.
  *
@@ -174,6 +188,59 @@ employeesRouter.patch(
         return
       }
       res.status(200).json({ id: data.id })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * POST /employees/:id/reset-password — HR 配發/重設某員工的登入密碼。若未帶
+ * password 則後端產生一組隨機密碼並回傳一次（供 HR 轉交員工）。更新的是該
+ * employee 對應的 Supabase auth user；查無 user_id（尚未綁定帳號）回 409。
+ */
+employeesRouter.post(
+  "/employees/:id/reset-password",
+  requireAuth,
+  requireTenant,
+  requireHrAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const tenantId = res.locals.tenantId as string
+    const { id } = req.params
+    const parsed = resetPasswordSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", details: parsed.error.flatten() })
+      return
+    }
+    try {
+      const { data: emp, error: empErr } = await supabaseAdmin
+        .from("employees")
+        .select("id, user_id")
+        .eq("tenant_id", tenantId)
+        .eq("id", id)
+        .maybeSingle()
+      if (empErr) {
+        next(new Error(`reset-password (load): ${empErr.message}`))
+        return
+      }
+      if (!emp) {
+        res.status(404).json({ error: "not_found" })
+        return
+      }
+      if (!emp.user_id) {
+        res.status(409).json({ error: "no_account" })
+        return
+      }
+      const password = parsed.data.password ?? generatePassword()
+      const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(emp.user_id as string, {
+        password,
+      })
+      if (updErr) {
+        next(new Error(`reset-password (update): ${updErr.message}`))
+        return
+      }
+      // 只有後端產生時才回傳明碼（供 HR 配發）；HR 自填則不回傳。
+      res.status(200).json({ id, password: parsed.data.password ? undefined : password })
     } catch (err) {
       next(err)
     }

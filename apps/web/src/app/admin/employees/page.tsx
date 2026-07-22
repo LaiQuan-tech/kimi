@@ -18,6 +18,7 @@ import {
   getEmployeeProfile,
   getEmployees,
   inviteEmployee,
+  resetEmployeePassword,
   saveEmployeeProfile,
   uploadEmployeeCertificationAttachment,
   uploadEmployeeEducationAttachment,
@@ -387,6 +388,32 @@ export default function EmployeesPage() {
     }
   }
 
+  async function onResetPassword(id: string, empName: string) {
+    const custom = window.prompt(
+      `為「${empName}」設定新密碼（至少 8 碼）。\n留空則由系統產生隨機密碼。`,
+      "",
+    );
+    if (custom === null) return; // 取消
+    const password = custom.trim();
+    if (password && password.length < 8) {
+      setError("密碼至少 8 碼");
+      return;
+    }
+    try {
+      const res = await resetEmployeePassword(id, password || undefined);
+      setError(null);
+      if (res.password) {
+        window.alert(`已配發新密碼給「${empName}」：\n\n${res.password}\n\n請複製後轉交員工（僅顯示這一次）。`);
+        setMessage(`已為 ${empName} 產生新密碼（請即時轉交）`);
+      } else {
+        setMessage(`已更新 ${empName} 的密碼`);
+      }
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      setError(status === 409 ? "此員工尚未綁定登入帳號" : err instanceof Error ? err.message : "重設密碼失敗");
+    }
+  }
+
   const profileFields = PROFILE_FIELDS.filter((field) => field.group === profileTab);
 
   return (
@@ -523,6 +550,7 @@ export default function EmployeesPage() {
                               編輯
                             </button>
                             <button onClick={() => void openProfile(employee.id)} className="text-sm font-medium" style={{ color: "var(--brand)" }}>My Data</button>
+                            <button onClick={() => void onResetPassword(employee.id, employee.name)} className="text-sm text-gray-600 hover:underline">重設密碼</button>
                             {employee.status === "active" && <button onClick={() => void onDeactivate(employee.id)} className="text-sm text-red-600 hover:underline">停用</button>}
                           </div>
                         </td>

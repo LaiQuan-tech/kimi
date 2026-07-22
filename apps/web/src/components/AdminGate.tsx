@@ -4,8 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AuthGate } from "@/components/AuthGate";
 import { getMe, type Me } from "@/lib/admin-api";
-
-const ADMIN_ROLES = ["hr_admin", "platform_admin"];
+import { ADMIN_ROLES } from "@/lib/roles";
 
 /**
  * Back-office gate. Sits inside AuthGate (so an unauthenticated visitor is

@@ -136,6 +136,17 @@ export function deactivateEmployee(id: string) {
   });
 }
 
+/**
+ * 配發/重設員工登入密碼。不帶 password → 後端產生隨機密碼並在回應回傳一次
+ * （供 HR 轉交）；自填 password → 回應不含密碼。尚未綁定帳號的員工回 409。
+ */
+export function resetEmployeePassword(id: string, password?: string) {
+  return apiFetch<{ id: string; password?: string }>(`/employees/${id}/reset-password`, {
+    method: "POST",
+    body: JSON.stringify(password ? { password } : {}),
+  });
+}
+
 /* ---------------------------------------------------- employee profile ----- */
 
 export interface EmployeeProfile {
