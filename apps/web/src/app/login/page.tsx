@@ -5,11 +5,14 @@ import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { useSession } from "@/lib/use-session";
 
+const REMEMBER_KEY = "kimi_login";
+
 export default function LoginPage() {
   const router = useRouter();
   const { session, loading } = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const resolveLoginEmail = (value: string) => {
@@ -21,6 +24,23 @@ export default function LoginPage() {
   useEffect(() => {
     if (!loading && session) router.replace("/ess");
   }, [loading, session, router]);
+
+  // 若之前勾選「記住帳號密碼」，載入時自動帶入並勾起。
+  // 註：帳密以明碼存在瀏覽器 localStorage（內部工具、使用者要求），
+  // 在共用電腦上請勿勾選。
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(REMEMBER_KEY);
+      if (saved) {
+        const { email: e, password: p } = JSON.parse(saved) as { email?: string; password?: string };
+        if (e) setEmail(e);
+        if (p) setPassword(p);
+        setRemember(true);
+      }
+    } catch {
+      /* 壞資料忽略 */
+    }
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -35,6 +55,16 @@ export default function LoginPage() {
       if (signInError) {
         setError(signInError.message);
         return;
+      }
+      // 記住帳密：勾選則存入 localStorage，取消則清除。
+      try {
+        if (remember) {
+          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email, password }));
+        } else {
+          localStorage.removeItem(REMEMBER_KEY);
+        }
+      } catch {
+        /* localStorage 不可用時略過 */
       }
       router.replace("/ess");
     } catch (err) {
@@ -84,6 +114,16 @@ export default function LoginPage() {
           onChange={(e) => setPassword(e.target.value)}
           className="w-full rounded-md border border-gray-300 px-3 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
         />
+
+        <label className="mb-4 flex items-center gap-2 text-sm text-gray-600 select-none cursor-pointer">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 accent-[var(--brand)]"
+          />
+          記住帳號密碼
+        </label>
 
         {error && (
           <p className="text-sm text-red-600 mb-4" role="alert">
