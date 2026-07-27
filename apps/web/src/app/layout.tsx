@@ -17,7 +17,7 @@ interface Branding {
 function getBranding(): Branding {
   return {
     brandColor: "#1F4E79",
-    title: "HR 差勤系統",
+    title: "亞斯特設計顧問 數位化系統",
   };
 }
 
@@ -25,7 +25,7 @@ const branding = getBranding();
 
 export const metadata: Metadata = {
   title: branding.title,
-  description: "多租戶白標 HR 差勤系統",
+  description: "亞斯特設計顧問 數位化系統 — 資料電子化、獎金自動分配、專案進度追蹤與人事差勤",
 };
 
 export const viewport: Viewport = {

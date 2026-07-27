@@ -105,8 +105,8 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
       {/* Sidebar */}
       <aside className="hidden shrink-0 border-b border-gray-100 bg-white md:block md:min-h-screen md:w-60 md:border-b-0 md:border-r">
         <div className="flex items-center justify-between px-5 py-4">
-          <span className="text-lg font-bold" style={{ color: "var(--brand)" }}>
-            {branding?.appName ?? "HR 後台"}
+          <span className="text-base font-bold leading-snug" style={{ color: "var(--brand)" }}>
+            {branding?.appName ?? "亞斯特設計顧問 數位化系統"}
           </span>
         </div>
         <nav className="flex flex-wrap gap-2 px-3 pb-3 md:flex-col md:flex-nowrap">
@@ -152,7 +152,7 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
                 className="block max-w-[52vw] truncate text-left text-xl font-bold leading-tight"
                 style={{ color: "var(--brand)" }}
               >
-                {branding?.appName ?? "HR 後台"}
+                {branding?.appName ?? "亞斯特設計顧問 數位化系統"}
               </button>
               <p className="truncate text-sm font-medium text-gray-400">
                 {activeItem?.label ?? "管理員後台"}

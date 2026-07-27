@@ -104,7 +104,7 @@ export function EssHeader({
           className="min-w-0 text-left text-xl font-bold leading-tight sm:text-lg lg:text-xl"
           style={{ color: "var(--brand)" }}
         >
-          <span className="block truncate">{appName ?? "HR 差勤系統"}</span>
+          <span className="block truncate">{appName ?? "亞斯特設計顧問 數位化系統"}</span>
           <span className="block text-sm font-medium text-gray-400 lg:hidden">員工自助</span>
         </button>
         <div className="flex shrink-0 items-center gap-2 sm:gap-3">

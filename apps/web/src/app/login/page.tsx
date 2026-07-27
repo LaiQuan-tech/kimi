@@ -86,7 +86,7 @@ export default function LoginPage() {
         >
           員工登入
         </h1>
-        <p className="text-sm text-gray-500 mb-6">HR 差勤系統 · 員工自助</p>
+        <p className="text-sm text-gray-500 mb-6">亞斯特設計顧問 數位化系統</p>
 
         <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="email">
           Email / 帳號
