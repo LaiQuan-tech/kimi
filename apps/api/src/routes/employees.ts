@@ -42,7 +42,7 @@ function generatePassword(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(14))
   let out = ""
   for (const b of bytes) out += alphabet[b % alphabet.length]
-  return `Kimi-${out}`
+  return `Aster-${out}`
 }
 
 /**

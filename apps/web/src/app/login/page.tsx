@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { useSession } from "@/lib/use-session";
 
-const REMEMBER_KEY = "kimi_login";
+const REMEMBER_KEY = "aster_login";
 
 export default function LoginPage() {
   const router = useRouter();
