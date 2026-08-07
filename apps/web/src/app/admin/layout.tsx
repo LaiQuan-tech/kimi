@@ -7,61 +7,105 @@ import { AdminGate } from "@/components/AdminGate";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { getBranding, type Branding, type Me } from "@/lib/admin-api";
 
-const NAV_GROUPS: { title: string; items: { href: string; label: string }[] }[] = [
+type NavItem = { href: string; label: string; soon?: boolean };
+
+/**
+ * 選單分組刻意對齊合約賣給客戶的模組（公司形象官網／系統基礎建置／員工帳號權限
+ * 配發／AI 專案進度追蹤／AI 知識庫／獎金自動分配／人事差勤），客戶打開後台才找得
+ * 到自己買的東西。`soon: true` = 該項尚未建置,選單上以「建置中」佔位而非隱藏,
+ * 讓交付進度對客戶是透明的。做完該功能時把 soon 拿掉即可。
+ */
+const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
-    title: "LinkUp",
+    title: "總覽",
     items: [
       { href: "/admin", label: "後台總覽" },
       { href: "/admin/notifications", label: "通知中心" },
-      { href: "/admin/announcements", label: "最新消息 / 公告" },
-      { href: "/admin/company-space", label: "Company Space" },
-    ],
-  },
-  {
-    title: "Dashboard",
-    items: [
       { href: "/admin/dashboard", label: "人力分析" },
       { href: "/admin/ai", label: "AI 助理" },
     ],
   },
   {
-    title: "專案",
-    items: [{ href: "/admin/projects", label: "專案獎金分潤" }],
-  },
-  {
-    title: "Foundation",
+    title: "AI 專案進度追蹤",
     items: [
-      { href: "/admin/onboarding", label: "Hire 報到管理" },
-      { href: "/admin/departments", label: "Org 單位" },
-      { href: "/admin/org-chart", label: "公司組織圖" },
-      { href: "/admin/employees", label: "People 人員" },
+      { href: "/admin/projects/overview", label: "專案總覽 · 甘特圖／看板", soon: true },
+      { href: "/admin/projects/alerts", label: "AI 進度示警", soon: true },
     ],
   },
   {
-    title: "Attendance",
+    title: "AI 知識庫",
+    items: [
+      { href: "/admin/knowledge", label: "文件庫 · 語意搜尋", soon: true },
+      { href: "/admin/knowledge/ask", label: "AI 文件問答", soon: true },
+      { href: "/admin/vendors", label: "廠商名冊 · 名片建檔", soon: true },
+    ],
+  },
+  {
+    title: "獎金自動分配",
+    items: [{ href: "/admin/projects", label: "專案與成員分潤" }],
+  },
+  {
+    title: "帳號與權限",
+    items: [
+      { href: "/admin/employees", label: "員工帳號與密碼配發" },
+      { href: "/admin/employee-mail", label: "專屬 Email 配發", soon: true },
+    ],
+  },
+  {
+    title: "人事差勤 · 組織人事",
+    items: [
+      { href: "/admin/departments", label: "組織單位" },
+      { href: "/admin/org-chart", label: "公司組織圖" },
+      { href: "/admin/onboarding", label: "報到管理" },
+    ],
+  },
+  {
+    title: "人事差勤 · 差勤管理",
     items: [
       { href: "/admin/shifts", label: "班別" },
       { href: "/admin/schedules", label: "排班 / 班表審核" },
       { href: "/admin/punch-records", label: "打卡紀錄維護" },
-      { href: "/admin/form-records", label: "表單紀錄管理" },
-      { href: "/admin/approvals", label: "待審核表單" },
       { href: "/admin/leave-types", label: "假別與簽核流程" },
       { href: "/admin/leave-balances", label: "假別時數管理" },
       { href: "/admin/attendance-settlement", label: "結算作業" },
-      { href: "/admin/module-settings", label: "模組設定" },
-      { href: "/admin/reports", label: "報表中心" },
     ],
   },
   {
-    title: "Payroll",
+    title: "人事差勤 · 表單簽核",
+    items: [
+      { href: "/admin/approvals", label: "待審核表單" },
+      { href: "/admin/form-records", label: "表單紀錄管理" },
+    ],
+  },
+  {
+    title: "人事差勤 · 薪資",
     items: [
       { href: "/admin/payroll", label: "薪資 / 保險資料" },
+      { href: "/admin/payslips", label: "薪資明細表", soon: true },
       { href: "/admin/payroll-tax", label: "所得稅 / 補充保費" },
     ],
   },
   {
-    title: "Recruitment",
-    items: [{ href: "/admin/recruitment", label: "招募 ATS" }],
+    title: "人事差勤 · 招募與考核",
+    items: [
+      { href: "/admin/recruitment", label: "招募 ATS" },
+      { href: "/admin/kpi", label: "績效考核", soon: true },
+    ],
+  },
+  {
+    title: "公司公告",
+    items: [
+      { href: "/admin/announcements", label: "最新消息 / 公告" },
+      { href: "/admin/company-space", label: "Company Space" },
+      { href: "/admin/company-info", label: "公司福利 / 職安資訊", soon: true },
+    ],
+  },
+  {
+    title: "系統設定",
+    items: [
+      { href: "/admin/module-settings", label: "模組設定" },
+      { href: "/admin/reports", label: "報表中心" },
+    ],
   },
 ];
 
@@ -116,18 +160,32 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
                 {group.title}
               </p>
               <div className="mt-1 flex flex-wrap gap-1 md:flex-col">
-                {group.items.map((item) => (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`rounded-md px-3 py-2 text-sm font-medium ${
-                      isActive(item.href) ? "text-white" : "text-gray-600 hover:bg-gray-100"
-                    }`}
-                    style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
-                  >
-                    {item.label}
-                  </Link>
-                ))}
+                {group.items.map((item) =>
+                  item.soon ? (
+                    <span
+                      key={item.href}
+                      aria-disabled="true"
+                      title="此功能建置中"
+                      className="flex cursor-not-allowed items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-gray-300"
+                    >
+                      <span className="truncate">{item.label}</span>
+                      <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-400">
+                        建置中
+                      </span>
+                    </span>
+                  ) : (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`rounded-md px-3 py-2 text-sm font-medium ${
+                        isActive(item.href) ? "text-white" : "text-gray-600 hover:bg-gray-100"
+                      }`}
+                      style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
+                    >
+                      {item.label}
+                    </Link>
+                  ),
+                )}
               </div>
             </div>
           ))}
@@ -176,25 +234,48 @@ function Shell({ me, children }: { me: Me; children: React.ReactNode }) {
             </div>
           </div>
           <nav className="-mx-3 mt-3 flex gap-2 overflow-x-auto px-3 pb-1" aria-label="後台功能切換">
-            {flatNav.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`shrink-0 rounded-full px-4 py-2.5 text-sm font-semibold ${
-                  isActive(item.href)
-                    ? "text-white shadow-sm"
-                    : "border border-gray-200 bg-gray-50 text-gray-700"
-                }`}
-                style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
-              >
-                {item.label}
-              </Link>
-            ))}
+            {flatNav.map((item) =>
+              item.soon ? (
+                <span
+                  key={item.href}
+                  aria-disabled="true"
+                  className="shrink-0 cursor-not-allowed rounded-full border border-dashed border-gray-200 bg-gray-50 px-4 py-2.5 text-sm font-semibold text-gray-300"
+                >
+                  {item.label}　建置中
+                </span>
+              ) : (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`shrink-0 rounded-full px-4 py-2.5 text-sm font-semibold ${
+                    isActive(item.href)
+                      ? "text-white shadow-sm"
+                      : "border border-gray-200 bg-gray-50 text-gray-700"
+                  }`}
+                  style={isActive(item.href) ? { backgroundColor: "var(--brand)" } : undefined}
+                >
+                  {item.label}
+                </Link>
+              ),
+            )}
           </nav>
           <nav className="-mx-3 mt-2 flex gap-2 overflow-x-auto px-3 pb-1" aria-label="後台模組分類">
             {NAV_GROUPS.map((group) => {
-              const first = group.items[0];
+              // 跳到該分類第一個「已建置」的頁面；整組都還沒做的分類不可點,
+              // 否則會連到尚不存在的路由。
+              const first = group.items.find((item) => !item.soon);
               const groupActive = group.items.some((item) => isActive(item.href));
+              if (!first) {
+                return (
+                  <span
+                    key={group.title}
+                    aria-disabled="true"
+                    className="shrink-0 cursor-not-allowed rounded-full border border-dashed border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-300"
+                  >
+                    {group.title}
+                  </span>
+                );
+              }
               return (
                 <Link
                   key={group.title}

@@ -62,17 +62,19 @@ export function EssHeader({
     short: string;
     href: string;
   }> = [
+    // 順序刻意與後台選單的模組分組一致(差勤 → 專案 → 薪資 → 其他),
+    // 讓員工端與管理端的心智模型相同。
     { key: "home", label: "今日打卡", short: "打卡", href: "/ess" },
-    { key: "projects", label: "專案知識庫", short: "專案", href: "/ess/projects" },
-    { key: "bonus", label: "我的分潤", short: "分潤", href: "/ess/my-bonus" },
-    { key: "requests", label: "我的申請", short: "申請", href: "/ess/requests" },
-    { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
     { key: "schedule", label: "個人班表", short: "班表", href: "/ess/schedule" },
     { key: "punches", label: "打卡紀錄", short: "紀錄", href: "/ess/punches" },
     { key: "balances", label: "剩餘假別", short: "假別", href: "/ess/balances" },
+    { key: "requests", label: "我的申請", short: "申請", href: "/ess/requests" },
+    { key: "projects", label: "專案知識庫", short: "專案", href: "/ess/projects" },
+    { key: "bonus", label: "我的分潤", short: "分潤", href: "/ess/my-bonus" },
     { key: "payslips", label: "我的薪資單", short: "薪資", href: "/ess/payslips" },
     { key: "jobs", label: "內部職缺", short: "職缺", href: "/ess/jobs" },
     { key: "ai", label: "AI 問答", short: "AI", href: "/ess/ai" },
+    { key: "notifications", label: "通知中心", short: "通知", href: "/ess/notifications" },
     { key: "mydata", label: "我的資料", short: "資料", href: "/ess/mydata" },
   ];
 
