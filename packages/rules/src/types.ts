@@ -5,6 +5,8 @@
  * `Date` objects or ISO-8601 strings; the engines normalise on the way in.
  */
 
+import type { OvertimeWhen } from "./rules-schema.js";
+
 /** A single in/out punch pair for one working day. */
 export interface PunchPair {
   inAt: Date | string;
@@ -62,6 +64,16 @@ export interface SalaryStructure {
   baseSalary?: number;
   dailyWage?: number;
   hourlyWage: number;
+  /** 勞保投保薪資 (已套級距的金額);未提供則不計勞保自付額。 */
+  laborInsuredSalary?: number;
+  /** 健保投保金額;未提供則不計健保自付額。 */
+  healthInsuredSalary?: number;
+  /** 健保眷屬人數 (本人不計);健保自付額 = 費率 × 自付比例 × (1 + 眷屬數)。 */
+  nhiDependents?: number;
+  /** 勞工自願提繳退休金比例 (0–0.06);以勞保投保薪資為基數。 */
+  pensionVoluntaryRate?: number;
+  /** 本期預支金額 (扣項)。 */
+  advance?: number;
 }
 
 /** 薪資單逐項。amount 正為加項、負為扣項。 */
@@ -92,6 +104,34 @@ export interface PayslipBreakdown {
   compTimeMinutes: number;
   /** 應發合計。 */
   gross: number;
+  /** 加班費按加班別×倍率分段的逐段明細 (供薪資明細表逐列呈現)。 */
+  overtimeSegments: OvertimeSegment[];
+  /** 勞保自付額 (正值)。 */
+  laborInsurance: number;
+  /** 健保自付額 (正值)。 */
+  healthInsurance: number;
+  /** 勞工自願提繳退休金 (正值)。 */
+  pensionVoluntary: number;
+  /** 本期預支 (正值)。 */
+  advance: number;
+  /** 應扣合計 = 勞保 + 健保 + 自願提繳 + 預支 (正值)。 */
+  totalDeductions: number;
+  /** 員工代墊支出 (加項;不計入 gross,直接加在實發)。 */
+  expenses: number;
+  /** 實發金額 = gross − totalDeductions + expenses。 */
+  net: number;
   /** 逐項稽核明細。 */
   lines: PayslipLine[];
+}
+
+/** 加班費的一個分段 (例:平日前 2 小時 1.334 倍)。 */
+export interface OvertimeSegment {
+  /** 加班別 (對應 RuleConfig.overtime.rules[].when)。 */
+  when: OvertimeWhen;
+  /** 該段倍率。 */
+  multiplier: number;
+  /** 該段時數 (小時)。 */
+  hours: number;
+  /** 該段金額。 */
+  amount: number;
 }

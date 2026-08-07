@@ -362,3 +362,93 @@ describe("parseRuleConfig 防呆", () => {
     ).toThrow();
   });
 });
+
+// =========================================================================
+// 規則四：客戶實表回歸 — 亞斯特設計顧問「(余裕哲)115-06 出勤統計表」
+//
+// 這條是拿客戶「現在正在用」的 Excel 當基準,逐項釘死引擎輸出。任何加班分段、
+// 保費或實發金額的邏輯改動若偏離這些數字,即代表與客戶既有薪資表脫鉤。
+//
+// 來源表關鍵欄位:
+//   本薪 37,000 / 平日每小時工資額 154.1667 (= 37000 ÷ 30 ÷ 8)
+//   加班分兩段:前 2 小時 ×1.334、第 3 小時起 ×1.666667
+//   當月合計「加班」40 小時、「超過2」15 小時 (逐日於第 2 小時切段後加總)
+//   勞保 955 (投保 38,200 × 12.5% × 20%)、健保 592 (38,200 × 5.17% × 30%)
+// =========================================================================
+describe("規則四 客戶實表回歸 (余裕哲 115-06)", () => {
+  // 逐日加班時數,直接抄自來源表的「加班」+「超過2」兩欄。
+  const DAILY_OT_HOURS = [
+    2, 1.5, 1.5, 2, 1.5, 1, 2, 3, 2, 1.5, 1, 2, 2, 3, 3.5, 3, 5, 4.5, 2.5, 1, 5.5, 3, 1,
+  ];
+
+  const days: AttendanceDay[] = DAILY_OT_HOURS.map((h, i) => ({
+    date: `2026-06-${String(i + 1).padStart(2, "0")}`,
+    workedMinutes: 8 * 60,
+    lateMinutes: 0,
+    overtimeMinutes: Math.round(h * 60),
+    nightMinutes: 0,
+    dayType: "workday" as const,
+  }));
+
+  const rules: RuleConfig = parseRuleConfig({
+    attendance_bonus: { base: 0, tiers: [{ lateMinutesUpTo: null, deduct: 0 }] },
+    overtime: {
+      rules: [
+        {
+          when: "weekday_ot",
+          multiplier: 1.334, // 無 tiers 時的後備值
+          tiers: [{ uptoHours: 2, multiplier: 1.334 }, { multiplier: 1.666667 }],
+        },
+      ],
+    },
+    night: { window: { from: "00:00", to: "08:30" }, multiplier: 2 },
+    payroll: { method: "monthly", dailyRegularHours: 8 },
+    insurance: {
+      labor: { rate: 0.125, employeeShare: 0.2 },
+      health: { rate: 0.0517, employeeShare: 0.3 },
+    },
+  });
+
+  const salary: SalaryStructure = {
+    method: "monthly",
+    baseSalary: 37000,
+    hourlyWage: 37000 / 30 / 8, // 154.1666…
+    laborInsuredSalary: 38200,
+    healthInsuredSalary: 38200,
+    nhiDependents: 0,
+  };
+
+  it("逐日於第 2 小時切段後,兩段時數合計與來源表相同 (40h / 15h)", () => {
+    const slip = computePayslip(days, salary, rules);
+    const tier1 = slip.overtimeSegments.find((s) => s.multiplier === 1.334);
+    const tier2 = slip.overtimeSegments.find((s) => s.multiplier === 1.666667);
+    expect(tier1?.hours).toBe(40);
+    expect(tier2?.hours).toBe(15);
+  });
+
+  it("加班費逐段金額與合計與來源表相同", () => {
+    const slip = computePayslip(days, salary, rules);
+    const tier1 = slip.overtimeSegments.find((s) => s.multiplier === 1.334)!;
+    const tier2 = slip.overtimeSegments.find((s) => s.multiplier === 1.666667)!;
+    expect(tier1.amount).toBeCloseTo(8226.33, 2); // 40 × 205.6583
+    expect(tier2.amount).toBeCloseTo(3854.17, 2); // 15 × 256.9445
+    expect(slip.overtimePay).toBeCloseTo(12080.5, 2);
+  });
+
+  it("應發 / 應扣 / 實發與來源表相同", () => {
+    const slip = computePayslip(days, salary, rules);
+    expect(slip.base).toBe(37000);
+    expect(slip.gross).toBeCloseTo(49080.5, 2); // 37000 + 12080.50
+    expect(slip.laborInsurance).toBe(955);
+    expect(slip.healthInsurance).toBe(592);
+    expect(slip.totalDeductions).toBe(1547);
+    expect(slip.net).toBeCloseTo(47533.5, 2); // 49080.50 − 1547
+  });
+
+  it("代墊支出加在實發、不進應發 (代收代付非薪資所得)", () => {
+    const slip = computePayslip(days, salary, rules, 1200);
+    expect(slip.gross).toBeCloseTo(49080.5, 2); // 應發不受影響
+    expect(slip.expenses).toBe(1200);
+    expect(slip.net).toBeCloseTo(48733.5, 2); // 47533.50 + 1200
+  });
+});

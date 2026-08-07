@@ -44,9 +44,19 @@ export type OvertimeWhen = z.infer<typeof OvertimeWhenSchema>;
 
 // 加班規則：when 觸發情境、multiplier 倍率、compTime 是否改以補休
 // (true = 不發現金，轉補休時數;預設 false 發現金)。
+// 分段倍率：勞基法的加班費是「累進」的（平日前 2 小時 1⅓、第 3 小時起 1⅔），
+// 故同一個 when 可帶一組 tiers，依當日加班時數由前往後逐段套率。
+// uptoHours = 這一段的累計上限（含）；最後一段省略 uptoHours 代表無上限。
+// 有 tiers 時忽略 multiplier；沒有 tiers 則沿用單一 multiplier（相容舊設定）。
+const OvertimeTierSchema = z.object({
+  uptoHours: z.number().positive().optional(),
+  multiplier: z.number(),
+});
+
 const OvertimeRuleSchema = z.object({
   when: OvertimeWhenSchema,
   multiplier: z.number(),
+  tiers: z.array(OvertimeTierSchema).nonempty().optional(),
   compTime: z.boolean().optional(),
 });
 
@@ -73,11 +83,25 @@ const PayrollSchema = z.object({
   dailyRegularHours: z.number().default(8),
 });
 
+// 勞健保自付額：以員工的投保薪資為基數。費率逐年調整，故放在租戶規則設定裡而非寫死。
+//   labor.rate         勞保普通事故＋就保合計費率 (例 0.125)
+//   labor.employeeShare 員工自付比例 (例 0.2)
+//   health.rate        健保費率 (例 0.0517)
+//   health.employeeShare 員工自付比例 (例 0.3)
+// 整段可省略；省略時不計保費（引擎回 0），既有租戶設定不會因此解析失敗。
+const InsuranceSchema = z
+  .object({
+    labor: z.object({ rate: z.number(), employeeShare: z.number() }),
+    health: z.object({ rate: z.number(), employeeShare: z.number() }),
+  })
+  .optional();
+
 export const RuleConfigSchema = z.object({
   attendance_bonus: AttendanceBonusSchema,
   overtime: OvertimeSchema,
   night: NightSchema,
   payroll: PayrollSchema,
+  insurance: InsuranceSchema,
 });
 
 export type RuleConfig = z.infer<typeof RuleConfigSchema>;
